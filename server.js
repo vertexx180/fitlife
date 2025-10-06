@@ -6,6 +6,8 @@ const bcrypt = require('bcrypt');
 const fetch = require('node-fetch');
 const sqlite3 = require('sqlite3').verbose();
 const { v4: uuidv4 } = require('uuid');
+const db = require('./db');
+
 
 const db = new sqlite3.Database('./data/db.sqlite');
 const app = express();
