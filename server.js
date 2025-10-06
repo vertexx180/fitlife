@@ -196,6 +196,36 @@ app.get('/api/stats', authMiddleware, adminOnly, async (req, res) => {
   res.json({ users: users.c, admins: admins.c });
 });
 
+// ===========================================================
+// TYMCZASOWY ENDPOINT – STWORZENIE KONTA ADMINA
+// ===========================================================
+app.get('/api/create-admin', async (req, res) => {
+  try {
+    const login = 'admin';
+    const password = 'StrongAdminPass123!'; // <-- tu możesz zmienić hasło
+    const role = 'owner';
+    const bcrypt = require('bcrypt');
+
+    // hashowanie hasła
+    const hash = await bcrypt.hash(password, 10);
+
+    // sprawdzenie czy admin już istnieje
+    const existing = await db.query('SELECT id FROM users WHERE login=$1', [login]);
+    if (existing.rowCount) {
+      await db.query('UPDATE users SET password_hash=$1, role=$2 WHERE login=$3', [hash, role, login]);
+      return res.send('Admin zaktualizowany.');
+    }
+
+    // wstawienie nowego admina
+    await db.query('INSERT INTO users (login, password_hash, role) VALUES ($1,$2,$3)', [login, hash, role]);
+    return res.send('Admin stworzony.');
+  } catch (err) {
+    console.error(err);
+    return res.status(500).send('Błąd serwera.');
+  }
+});
+
+
 app.get('/', (_, res) => res.send('✅ Backend działa'));
 
 const PORT = process.env.PORT || 10000;
