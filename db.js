@@ -1,5 +1,5 @@
 const bcrypt = require('bcrypt');
-const Database = require('better-sqlite3');
+const sqlite3 = require('sqlite3').verbose();
 const db = new Database('./data/db.sqlite');
 
 db.prepare(`CREATE TABLE IF NOT EXISTS users (
