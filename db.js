@@ -1,70 +1,84 @@
-// db.js – wersja pod sqlite3 (Render + Node 24)
-const sqlite3 = require('sqlite3').verbose();
+// db.js – wersja PostgreSQL / Neon
+const { Pool } = require('pg');
 const bcrypt = require('bcrypt');
-const fs = require('fs');
-const path = require('path');
 
-const dataDir = path.join(__dirname, 'data');
-if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir);
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false } // ważne dla Render / Neon
+});
 
-const db = new sqlite3.Database(path.join(dataDir, 'db.sqlite'));
+// Funkcja do wykonywania zapytań
+const query = (text, params) => pool.query(text, params);
 
-db.serialize(() => {
-  db.run(`CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    login TEXT UNIQUE,
-    password_hash TEXT,
-    firstName TEXT,
-    lastName TEXT,
-    plan TEXT,
-    role TEXT DEFAULT 'user',
-    lastIP TEXT,
-    geoLocation TEXT,
-    lastLogin TEXT
-  )`);
-
-  db.run(`CREATE TABLE IF NOT EXISTS workouts (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    userId INTEGER,
-    date TEXT,
-    level TEXT,
-    duration INTEGER,
-    hour TEXT,
-    completed INTEGER DEFAULT 0
-  )`);
-
-  db.run(`CREATE TABLE IF NOT EXISTS plans (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT,
-    isPaid INTEGER DEFAULT 0,
-    price INTEGER DEFAULT 0,
-    config TEXT
-  )`);
-
-  db.run(`CREATE TABLE IF NOT EXISTS reset_tokens (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    userId INTEGER,
-    token TEXT,
-    expiresAt INTEGER
-  )`);
-
-  db.get("SELECT COUNT(*) as c FROM users WHERE role IN ('admin','owner')", (err, row) => {
-    if (err) return console.error(err);
-    if (row.c === 0) {
-      const hash = bcrypt.hashSync('StrongAdminPass123!', 10);
-      db.run(
-        'INSERT INTO users (login, password_hash, firstName, lastName, role, plan) VALUES (?, ?, ?, ?, ?, ?)',
-        ['admin', hash, 'Admin', 'Account', 'owner', 'Pro'],
-        (err2) => {
-          if (err2) console.error(err2);
-          else console.log('✅ Admin seeded: login=admin, pass=StrongAdminPass123!');
-        }
+// Funkcja inicjalizująca bazę (tworzenie tabel i seed admina)
+const initDB = async () => {
+  try {
+    // Tabele
+    await query(`
+      CREATE TABLE IF NOT EXISTS users (
+        id SERIAL PRIMARY KEY,
+        login TEXT UNIQUE,
+        password_hash TEXT,
+        firstName TEXT,
+        lastName TEXT,
+        plan TEXT,
+        role TEXT DEFAULT 'user',
+        lastIP TEXT,
+        geoLocation TEXT,
+        lastLogin TIMESTAMP
       );
-    }
-  });
-});
+    `);
 
-db.close(() => {
-  console.log('✅ Database migrated!');
-  process.exit(0);
-});
+    await query(`
+      CREATE TABLE IF NOT EXISTS workouts (
+        id SERIAL PRIMARY KEY,
+        userId INTEGER REFERENCES users(id),
+        date DATE,
+        level TEXT,
+        duration INTEGER,
+        hour TEXT,
+        completed BOOLEAN DEFAULT FALSE
+      );
+    `);
+
+    await query(`
+      CREATE TABLE IF NOT EXISTS plans (
+        id SERIAL PRIMARY KEY,
+        name TEXT,
+        isPaid BOOLEAN DEFAULT FALSE,
+        price INTEGER DEFAULT 0,
+        config TEXT
+      );
+    `);
+
+    await query(`
+      CREATE TABLE IF NOT EXISTS reset_tokens (
+        id SERIAL PRIMARY KEY,
+        userId INTEGER REFERENCES users(id),
+        token TEXT,
+        expiresAt TIMESTAMP
+      );
+    `);
+
+    // Seed admina jeśli nie istnieje
+    const existingAdmin = await query(
+      "SELECT id FROM users WHERE role IN ('admin','owner')"
+    );
+
+    if (existingAdmin.rowCount === 0) {
+      const hash = await bcrypt.hash('StrongAdminPass123!', 10);
+      await query(
+        `INSERT INTO users (login, password_hash, firstName, lastName, role, plan)
+         VALUES ($1,$2,$3,$4,$5,$6)`,
+        ['admin', hash, 'Admin', 'Account', 'owner', 'Pro']
+      );
+      console.log('✅ Admin seeded: login=admin, pass=StrongAdminPass123!');
+    }
+
+    console.log('✅ Database initialized!');
+  } catch (err) {
+    console.error('❌ Error initializing database:', err);
+  }
+};
+
+module.exports = { query, initDB, pool };
