@@ -15,7 +15,7 @@
     "jsonwebtoken": "^9.0.0",
     "node-fetch": "^3.3.2",
     "uuid": "^9.0.0",
-    "express-rate-limit": "^6.7.0"
+    "express-rate-limit": "^6.7.0",
     "pg": "^8.11.0"
   },
   "engines": {
