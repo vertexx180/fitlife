@@ -5,6 +5,11 @@
   "scripts": {
     "start": "node server.js",
     "migrate": "node db.js"
+   "start": "react-scripts start",
+   "build": "react-scripts build",
+   "test": "react-scripts test",
+   "eject": "react-scripts eject"
+}
   },
   "dependencies": {
     "sqlite3": "^5.1.7",
