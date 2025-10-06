@@ -5,19 +5,18 @@
   "scripts": {
     "start": "node server.js",
     "migrate": "node db.js"
-}
   },
   "dependencies": {
-    "sqlite3": "^5.1.7",
     "bcrypt": "^5.1.0",
     "cors": "^2.8.5",
     "express": "^4.18.2",
+    "express-rate-limit": "^6.7.0",
     "helmet": "^6.0.0",
     "jsonwebtoken": "^9.0.0",
     "node-fetch": "^3.3.2",
-    "uuid": "^9.0.0",
-    "express-rate-limit": "^6.7.0",
-    "pg": "^8.11.0"
+    "pg": "^8.11.0",
+    "sqlite3": "^5.1.7",
+    "uuid": "^9.0.0"
   },
   "engines": {
     "node": ">=18"
