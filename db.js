@@ -1,52 +1,70 @@
-const bcrypt = require('bcrypt');
+// db.js – wersja pod sqlite3 (Render + Node 24)
 const sqlite3 = require('sqlite3').verbose();
-const db = new Database('./data/db.sqlite');
+const bcrypt = require('bcrypt');
+const fs = require('fs');
+const path = require('path');
 
-db.prepare(`CREATE TABLE IF NOT EXISTS users (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  login TEXT UNIQUE,
-  password_hash TEXT,
-  firstName TEXT,
-  lastName TEXT,
-  plan TEXT,
-  role TEXT DEFAULT 'user',
-  lastIP TEXT,
-  geoLocation TEXT,
-  lastLogin TEXT
-)`).run();
+const dataDir = path.join(__dirname, 'data');
+if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir);
 
-db.prepare(`CREATE TABLE IF NOT EXISTS workouts (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  userId INTEGER,
-  date TEXT,
-  level TEXT,
-  duration INTEGER,
-  hour TEXT,
-  completed INTEGER DEFAULT 0
-)`).run();
+const db = new sqlite3.Database(path.join(dataDir, 'db.sqlite'));
 
-db.prepare(`CREATE TABLE IF NOT EXISTS plans (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  name TEXT,
-  isPaid INTEGER DEFAULT 0,
-  price INTEGER DEFAULT 0,
-  config TEXT
-)`).run();
+db.serialize(() => {
+  db.run(`CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    login TEXT UNIQUE,
+    password_hash TEXT,
+    firstName TEXT,
+    lastName TEXT,
+    plan TEXT,
+    role TEXT DEFAULT 'user',
+    lastIP TEXT,
+    geoLocation TEXT,
+    lastLogin TEXT
+  )`);
 
-db.prepare(`CREATE TABLE IF NOT EXISTS reset_tokens (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  userId INTEGER,
-  token TEXT,
-  expiresAt INTEGER
-)`).run();
+  db.run(`CREATE TABLE IF NOT EXISTS workouts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    userId INTEGER,
+    date TEXT,
+    level TEXT,
+    duration INTEGER,
+    hour TEXT,
+    completed INTEGER DEFAULT 0
+  )`);
 
-const adminCount = db.prepare("SELECT COUNT(*) as c FROM users WHERE role IN ('admin','owner')").get().c;
-if (adminCount === 0) {
-  const hash = bcrypt.hashSync('StrongAdminPass123!', 10);
-  db.prepare('INSERT INTO users (login,password_hash,firstName,lastName,role,plan) VALUES (?,?,?,?,?,?)')
-    .run('admin', hash, 'Admin', 'Account', 'owner', 'Pro');
-  console.log('✅ Admin seeded: login=admin, pass=StrongAdminPass123!');
-}
+  db.run(`CREATE TABLE IF NOT EXISTS plans (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT,
+    isPaid INTEGER DEFAULT 0,
+    price INTEGER DEFAULT 0,
+    config TEXT
+  )`);
 
-console.log('✅ Database migrated!');
-process.exit(0);
+  db.run(`CREATE TABLE IF NOT EXISTS reset_tokens (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    userId INTEGER,
+    token TEXT,
+    expiresAt INTEGER
+  )`);
+
+  db.get("SELECT COUNT(*) as c FROM users WHERE role IN ('admin','owner')", (err, row) => {
+    if (err) return console.error(err);
+    if (row.c === 0) {
+      const hash = bcrypt.hashSync('StrongAdminPass123!', 10);
+      db.run(
+        'INSERT INTO users (login, password_hash, firstName, lastName, role, plan) VALUES (?, ?, ?, ?, ?, ?)',
+        ['admin', hash, 'Admin', 'Account', 'owner', 'Pro'],
+        (err2) => {
+          if (err2) console.error(err2);
+          else console.log('✅ Admin seeded: login=admin, pass=StrongAdminPass123!');
+        }
+      );
+    }
+  });
+});
+
+db.close(() => {
+  console.log('✅ Database migrated!');
+  process.exit(0);
+});
