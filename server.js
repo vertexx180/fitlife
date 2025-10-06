@@ -120,43 +120,6 @@ app.post('/api/auth/reset-confirm', async (req, res) => {
 // ===========================================================
 // ADMIN
 // ===========================================================
-app.put('/api/admin/users/:id/set-password', authMiddleware, adminOnly, async (req, res) => {
-  const { id } = req.params;
-  const { newPassword } = req.body;
-  const hash = await bcrypt.hash(newPassword, 10);
-  await db.query('UPDATE users SET password_hash=$1 WHERE id=$2', [hash, id]);
-  res.json({ ok: true });
-});
-
-app.post('/api/admin/users/:id/impersonate', authMiddleware, adminOnly, async (req, res) => {
-  const { id } = req.params;
-  const userRes = await db.query('SELECT * FROM users WHERE id=$1', [id]);
-  const user = userRes.rows[0];
-  if (!user) return res.status(404).json({ error: 'not_found' });
-  const token = signToken(user);
-  res.json({ ok: true, token, user });
-});
-
-app.get('/api/users', authMiddleware, adminOnly, async (req, res) => {
-  const usersRes = await db.query(
-    'SELECT id, login, firstName, lastName, plan, role, lastIP, geoLocation, lastLogin FROM users'
-  );
-  res.json(usersRes.rows);
-});
-
-app.put('/api/users/:id', authMiddleware, async (req, res) => {
-  const { id } = req.params;
-  const actor = req.user;
-  if (!(actor.role === 'admin' || actor.role === 'owner' || actor.id == id))
-    return res.status(403).json({ error: 'forbidden' });
-
-  const { firstName, lastName, plan, role } = req.body;
-  await db.query(
-    'UPDATE users SET firstName=$1, lastName=$2, plan=$3, role=$4 WHERE id=$5',
-    [firstName, lastName, plan, role, id]
-  );
-  res.json({ ok: true });
-});
 
 // ===========================================================
 // WORKOUTY
