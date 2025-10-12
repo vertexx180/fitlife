@@ -38,7 +38,14 @@ const userSchema = new mongoose.Schema({
     duration: Number,
     hour: String,
     completed: Boolean
-  }]
+  }],
+  activeWorkout: {
+    date: String,
+    level: String,
+    currentExerciseIndex: Number,
+    timer: Number,
+    startTime: Date
+  }
 });
 
 const planSchema = new mongoose.Schema({
@@ -53,23 +60,47 @@ const planSchema = new mongoose.Schema({
     friday: { name: String, emoji: String, exercises: Array },
     saturday: { name: String, emoji: String, exercises: Array },
     sunday: { name: String, emoji: String, exercises: Array }
-  }
+  },
+  purchaseCount: { type: Number, default: 0 },
+  revenue: { type: Number, default: 0 }
+});
+
+const auditLogSchema = new mongoose.Schema({
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  userName: String,
+  action: String,
+  details: String,
+  targetUser: String,
+  ipAddress: String,
+  timestamp: { type: Date, default: Date.now }
+});
+
+const purchaseSchema = new mongoose.Schema({
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  planName: String,
+  price: Number,
+  timestamp: { type: Date, default: Date.now }
 });
 
 const User = mongoose.model('User', userSchema);
 const Plan = mongoose.model('Plan', planSchema);
+const AuditLog = mongoose.model('AuditLog', auditLogSchema);
+const Purchase = mongoose.model('Purchase', purchaseSchema);
 
 // Middleware do weryfikacji tokenu
 const verifyToken = (req, res, next) => {
-  const token = req.headers.authorization?.split(' ')[1];
+  const authHeader = req.headers.authorization;
   
-  if (!token) {
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
     return res.status(401).json({ error: 'Brak tokenu autoryzacji' });
   }
+
+  const token = authHeader.split(' ')[1];
 
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET || 'fitlife_secret_key_2025');
     req.userId = decoded.userId;
+    req.userRole = decoded.role;
     next();
   } catch (error) {
     return res.status(401).json({ error: 'Nieprawidłowy token' });
@@ -83,16 +114,47 @@ const verifyAdmin = async (req, res, next) => {
     if (!user || (user.role !== 'admin' && user.role !== 'owner')) {
       return res.status(403).json({ error: 'Brak uprawnień administratora' });
     }
+    req.currentUser = user;
     next();
   } catch (error) {
     return res.status(500).json({ error: 'Błąd serwera' });
   }
 };
 
+// Middleware do sprawdzania roli ownera
+const verifyOwner = async (req, res, next) => {
+  try {
+    const user = await User.findById(req.userId);
+    if (!user || user.role !== 'owner') {
+      return res.status(403).json({ error: 'Brak uprawnień właściciela' });
+    }
+    req.currentUser = user;
+    next();
+  } catch (error) {
+    return res.status(500).json({ error: 'Błąd serwera' });
+  }
+};
+
+// Funkcja logowania działań adminów
+async function logAdminAction(userId, userName, action, details, targetUser, ipAddress) {
+  try {
+    const log = new AuditLog({
+      userId,
+      userName,
+      action,
+      details,
+      targetUser,
+      ipAddress
+    });
+    await log.save();
+  } catch (error) {
+    console.error('Błąd logowania:', error);
+  }
+}
+
 // Funkcja do pobierania geolokalizacji z IP
 async function getGeoLocation(ip) {
   try {
-    // Pomijamy lokalne IP
     if (ip === '::1' || ip === '127.0.0.1' || ip.startsWith('192.168.')) {
       return 'Localhost';
     }
@@ -117,20 +179,15 @@ app.post('/api/register', async (req, res) => {
   try {
     const { login, password, firstName, lastName } = req.body;
 
-    // Sprawdź czy użytkownik już istnieje
     const existingUser = await User.findOne({ login });
     if (existingUser) {
       return res.status(400).json({ error: 'Użytkownik już istnieje' });
     }
 
-    // Hash hasła
     const hashedPassword = await bcrypt.hash(password, 10);
-
-    // Pobierz IP i geolokalizację
     const ip = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
     const geoLocation = await getGeoLocation(ip);
 
-    // Stwórz użytkownika
     const user = new User({
       login,
       password: hashedPassword,
@@ -141,7 +198,6 @@ app.post('/api/register', async (req, res) => {
     });
 
     await user.save();
-
     res.status(201).json({ message: 'Użytkownik utworzony pomyślnie' });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -153,36 +209,30 @@ app.post('/api/login', async (req, res) => {
   try {
     const { login, password } = req.body;
 
-    // Znajdź użytkownika
     const user = await User.findOne({ login });
     if (!user) {
       return res.status(401).json({ error: 'Nieprawidłowy login lub hasło' });
     }
 
-    // Sprawdź hasło
     const isValidPassword = await bcrypt.compare(password, user.password);
     if (!isValidPassword) {
       return res.status(401).json({ error: 'Nieprawidłowy login lub hasło' });
     }
 
-    // Pobierz IP i geolokalizację
     const ip = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
     const geoLocation = await getGeoLocation(ip);
 
-    // Aktualizuj dane logowania
     user.lastLogin = new Date();
     user.lastIP = ip;
     user.geoLocation = geoLocation;
     await user.save();
 
-    // Generuj token
     const token = jwt.sign(
       { userId: user._id, role: user.role },
       process.env.JWT_SECRET || 'fitlife_secret_key_2025',
       { expiresIn: '7d' }
     );
 
-    // Zwróć dane użytkownika (bez hasła)
     const userData = {
       id: user._id,
       login: user.login,
@@ -193,7 +243,8 @@ app.post('/api/login', async (req, res) => {
       lastLogin: user.lastLogin,
       lastIP: user.lastIP,
       geoLocation: user.geoLocation,
-      workoutHistory: user.workoutHistory
+      workoutHistory: user.workoutHistory,
+      activeWorkout: user.activeWorkout
     };
 
     res.json({ token, user: userData });
@@ -228,22 +279,84 @@ app.put('/api/user/profile', verifyToken, async (req, res) => {
   }
 });
 
-// 💪 Dodaj trening do historii
-app.post('/api/workout', verifyToken, async (req, res) => {
+// 💪 Rozpocznij/Wznów trening
+app.post('/api/workout/start', verifyToken, async (req, res) => {
   try {
-    const { date, level, duration, hour } = req.body;
-    
+    const { level } = req.body;
     const user = await User.findById(req.userId);
-    user.workoutHistory.push({
-      date,
+    const today = new Date().toISOString().split('T')[0];
+
+    // Sprawdź czy trening już był dzisiaj
+    const todayWorkout = user.workoutHistory.find(w => w.date === today && w.completed);
+    if (todayWorkout) {
+      return res.status(400).json({ error: 'Trening na dzisiaj już został ukończony' });
+    }
+
+    // Sprawdź czy jest aktywny trening
+    if (user.activeWorkout && user.activeWorkout.date === today) {
+      return res.json({ 
+        message: 'Wznowiono trening',
+        activeWorkout: user.activeWorkout 
+      });
+    }
+
+    // Rozpocznij nowy trening
+    user.activeWorkout = {
+      date: today,
       level,
-      duration,
-      hour,
-      completed: true
-    });
-    
+      currentExerciseIndex: 0,
+      timer: 0,
+      startTime: new Date()
+    };
+
     await user.save();
-    res.json({ message: 'Trening zapisany', workoutHistory: user.workoutHistory });
+    res.json({ 
+      message: 'Rozpoczęto trening',
+      activeWorkout: user.activeWorkout 
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 💪 Aktualizuj postęp treningu
+app.put('/api/workout/progress', verifyToken, async (req, res) => {
+  try {
+    const { currentExerciseIndex, timer } = req.body;
+    const user = await User.findById(req.userId);
+
+    if (user.activeWorkout) {
+      user.activeWorkout.currentExerciseIndex = currentExerciseIndex;
+      user.activeWorkout.timer = timer;
+      await user.save();
+    }
+
+    res.json({ message: 'Postęp zapisany' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 💪 Zakończ trening
+app.post('/api/workout/finish', verifyToken, async (req, res) => {
+  try {
+    const { duration } = req.body;
+    const user = await User.findById(req.userId);
+
+    if (user.activeWorkout) {
+      user.workoutHistory.push({
+        date: user.activeWorkout.date,
+        level: user.activeWorkout.level,
+        duration,
+        hour: new Date().toLocaleTimeString('pl-PL', { hour: '2-digit', minute: '2-digit' }),
+        completed: true
+      });
+
+      user.activeWorkout = undefined;
+      await user.save();
+    }
+
+    res.json({ message: 'Trening ukończony', workoutHistory: user.workoutHistory });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -308,11 +421,23 @@ app.get('/api/admin/users/:id', verifyToken, verifyAdmin, async (req, res) => {
 app.put('/api/admin/users/:id', verifyToken, verifyAdmin, async (req, res) => {
   try {
     const { firstName, lastName, login, plan, role } = req.body;
+    const targetUser = await User.findById(req.params.id);
+    
     const user = await User.findByIdAndUpdate(
       req.params.id,
       { firstName, lastName, login, plan, role },
       { new: true }
     ).select('-password');
+    
+    const ip = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
+    await logAdminAction(
+      req.userId,
+      req.currentUser.login,
+      'EDIT_USER',
+      `Edytowano użytkownika: ${targetUser.login}`,
+      targetUser.login,
+      ip
+    );
     
     res.json(user);
   } catch (error) {
@@ -320,12 +445,11 @@ app.put('/api/admin/users/:id', verifyToken, verifyAdmin, async (req, res) => {
   }
 });
 
-// 🔑 Pokaż hasło użytkownika (admin z potwierdzeniem)
+// 🔑 Pokaż info o haśle (admin)
 app.post('/api/admin/users/:id/show-password', verifyToken, verifyAdmin, async (req, res) => {
   try {
     const { adminPassword } = req.body;
     
-    // Sprawdź hasło admina
     const admin = await User.findById(req.userId);
     const isValidPassword = await bcrypt.compare(adminPassword, admin.password);
     
@@ -333,10 +457,22 @@ app.post('/api/admin/users/:id/show-password', verifyToken, verifyAdmin, async (
       return res.status(401).json({ error: 'Nieprawidłowe hasło administratora' });
     }
 
-    // To tylko pokazuje, że hasło jest zahashowane - w prawdziwej apce NIE zwracamy hasła
+    const ip = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
+    const targetUser = await User.findById(req.params.id);
+    
+    await logAdminAction(
+      req.userId,
+      admin.login,
+      'VIEW_PASSWORD_INFO',
+      `Próba dostępu do hasła użytkownika: ${targetUser.login}`,
+      targetUser.login,
+      ip
+    );
+
     res.json({ 
-      message: 'Hasło jest zahashowane i nie może być odszyfrowane',
-      info: 'Użyj funkcji resetowania hasła aby wysłać link do zmiany'
+      message: 'Hasło jest zahashowane algorytmem bcrypt',
+      info: 'Hasła nie można odszyfrować. Użyj funkcji resetowania hasła.',
+      hash: targetUser.password.substring(0, 20) + '...'
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -355,6 +491,16 @@ app.post('/api/admin/users/:id/reset-password', verifyToken, verifyAdmin, async 
     
     const resetLink = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/reset-password/${resetToken}`;
     
+    const ip = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
+    await logAdminAction(
+      req.userId,
+      req.currentUser.login,
+      'RESET_PASSWORD',
+      `Wygenerowano link resetowania dla: ${user.login}`,
+      user.login,
+      ip
+    );
+    
     res.json({ resetLink });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -364,7 +510,19 @@ app.post('/api/admin/users/:id/reset-password', verifyToken, verifyAdmin, async 
 // 🗑️ Usuń użytkownika (admin)
 app.delete('/api/admin/users/:id', verifyToken, verifyAdmin, async (req, res) => {
   try {
+    const targetUser = await User.findById(req.params.id);
     await User.findByIdAndDelete(req.params.id);
+    
+    const ip = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
+    await logAdminAction(
+      req.userId,
+      req.currentUser.login,
+      'DELETE_USER',
+      `Usunięto użytkownika: ${targetUser.login}`,
+      targetUser.login,
+      ip
+    );
+    
     res.json({ message: 'Użytkownik usunięty' });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -376,6 +534,17 @@ app.post('/api/admin/plans', verifyToken, verifyAdmin, async (req, res) => {
   try {
     const plan = new Plan(req.body);
     await plan.save();
+    
+    const ip = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
+    await logAdminAction(
+      req.userId,
+      req.currentUser.login,
+      'ADD_PLAN',
+      `Dodano nowy plan: ${plan.name}`,
+      null,
+      ip
+    );
+    
     res.status(201).json(plan);
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -385,14 +554,26 @@ app.post('/api/admin/plans', verifyToken, verifyAdmin, async (req, res) => {
 // 🗑️ Usuń plan (admin)
 app.delete('/api/admin/plans/:id', verifyToken, verifyAdmin, async (req, res) => {
   try {
+    const plan = await Plan.findById(req.params.id);
     await Plan.findByIdAndDelete(req.params.id);
+    
+    const ip = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
+    await logAdminAction(
+      req.userId,
+      req.currentUser.login,
+      'DELETE_PLAN',
+      `Usunięto plan: ${plan.name}`,
+      null,
+      ip
+    );
+    
     res.json({ message: 'Plan usunięty' });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
-// 📊 Statystyki aplikacji (admin/owner)
+// 📊 Statystyki aplikacji (admin)
 app.get('/api/admin/stats', verifyToken, verifyAdmin, async (req, res) => {
   try {
     const totalUsers = await User.countDocuments();
@@ -418,12 +599,166 @@ app.get('/api/admin/stats', verifyToken, verifyAdmin, async (req, res) => {
   }
 });
 
+// === OWNER ROUTES ===
+
+// 📜 Pobierz logi adminów (owner)
+app.get('/api/owner/audit-logs', verifyToken, verifyOwner, async (req, res) => {
+  try {
+    const logs = await AuditLog.find()
+      .sort({ timestamp: -1 })
+      .limit(100)
+      .populate('userId', 'login firstName lastName');
+    res.json(logs);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 💰 Statystyki zakupów (owner)
+app.get('/api/owner/purchase-stats', verifyToken, verifyOwner, async (req, res) => {
+  try {
+    const purchases = await Purchase.find().populate('userId', 'login firstName lastName');
+    const totalRevenue = purchases.reduce((sum, p) => sum + p.price, 0);
+    const plans = await Plan.find();
+    
+    const planStats = plans.map(plan => ({
+      name: plan.name,
+      purchases: plan.purchaseCount,
+      revenue: plan.revenue
+    }));
+
+    res.json({
+      totalRevenue,
+      totalPurchases: purchases.length,
+      recentPurchases: purchases.slice(0, 10),
+      planStats
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 👥 Zarządzanie adminami (owner)
+app.get('/api/owner/admins', verifyToken, verifyOwner, async (req, res) => {
+  try {
+    const admins = await User.find({ role: { $in: ['admin', 'owner'] } }).select('-password');
+    res.json(admins);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 📊 Statystyki użytkowników (owner)
+app.get('/api/owner/user-stats', verifyToken, verifyOwner, async (req, res) => {
+  try {
+    const users = await User.find();
+    const totalUsers = users.length;
+    const activeUsers = users.filter(u => {
+      const daysSinceLogin = (new Date() - new Date(u.lastLogin)) / (1000 * 60 * 60 * 24);
+      return daysSinceLogin <= 7;
+    }).length;
+
+    const usersByPlan = {};
+    users.forEach(u => {
+      usersByPlan[u.plan] = (usersByPlan[u.plan] || 0) + 1;
+    });
+
+    const avgWorkoutsPerUser = users.reduce((sum, u) => sum + u.workoutHistory.length, 0) / totalUsers;
+
+    res.json({
+      totalUsers,
+      activeUsers,
+      inactiveUsers: totalUsers - activeUsers,
+      usersByPlan,
+      avgWorkoutsPerUser: avgWorkoutsPerUser.toFixed(2),
+      newUsersThisMonth: users.filter(u => {
+        const userDate = new Date(u.createdAt);
+        const now = new Date();
+        return userDate.getMonth() === now.getMonth() && userDate.getFullYear() === now.getFullYear();
+      }).length
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 🔧 Konfiguracja systemu (owner)
+app.get('/api/owner/system-config', verifyToken, verifyOwner, async (req, res) => {
+  try {
+    const dbStats = await mongoose.connection.db.stats();
+    
+    res.json({
+      database: {
+        size: (dbStats.dataSize / 1024 / 1024).toFixed(2) + ' MB',
+        collections: dbStats.collections,
+        indexes: dbStats.indexes
+      },
+      server: {
+        nodeVersion: process.version,
+        platform: process.platform,
+        uptime: (process.uptime() / 3600).toFixed(2) + ' godzin'
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 📧 Wysyłanie powiadomień (owner)
+app.post('/api/owner/send-notification', verifyToken, verifyOwner, async (req, res) => {
+  try {
+    const { title, message, userIds } = req.body;
+    
+    // W przyszłości: integracja z systemem email/push notifications
+    // Na razie logujemy
+    const ip = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
+    await logAdminAction(
+      req.userId,
+      req.currentUser.login,
+      'SEND_NOTIFICATION',
+      `Wysłano powiadomienie: "${title}" do ${userIds?.length || 'wszystkich'} użytkowników`,
+      null,
+      ip
+    );
+    
+    res.json({ 
+      message: 'Powiadomienie wysłane',
+      recipients: userIds?.length || 'wszyscy użytkownicy'
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 🗄️ Backup bazy danych (owner)
+app.post('/api/owner/backup-database', verifyToken, verifyOwner, async (req, res) => {
+  try {
+    const ip = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
+    await logAdminAction(
+      req.userId,
+      req.currentUser.login,
+      'DATABASE_BACKUP',
+      'Zainicjowano backup bazy danych',
+      null,
+      ip
+    );
+    
+    // W przyszłości: rzeczywisty backup
+    res.json({ 
+      message: 'Backup zainicjowany',
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // 🚀 Health check
 app.get('/api/health', (req, res) => {
   res.json({ status: 'OK', message: 'FitLife Backend działa!' });
 });
 
-// Inicjalizacja domyślnego planu Andrut
+// Inicjalizacja domyślnego planu
 async function initializeDefaultPlan() {
   try {
     const existingPlan = await Plan.findOne({ name: 'Andrut Plan' });
@@ -437,202 +772,15 @@ async function initializeDefaultPlan() {
             name: 'Ręce + Klatka',
             emoji: '🧨',
             exercises: [
-              {
-                name: 'Pompki klasyczne',
-                description: 'Dłonie na szerokość barków, ciało proste, opuszczasz klatę prawie do ziemi i wypychasz się.',
-                reps: { easy: '3×10', medium: '4×15', hard: '5×20' }
-              },
-              {
-                name: 'Pompki diamentowe',
-                description: 'Dłonie blisko siebie w kształt diamentu; mocno działa triceps.',
-                reps: { easy: '3×8', medium: '4×10', hard: '5×12' }
-              },
-              {
-                name: 'Dipy między krzesłami',
-                description: 'Opierasz się rękami na dwóch krzesłach, zginając łokcie za sobą.',
-                reps: { easy: '3×8', medium: '4×10', hard: '5×12' }
-              },
-              {
-                name: 'Uginanie ramion z plecakiem',
-                description: 'Stajesz prosto, trzymasz plecak jak hantle i uginasz ręce do góry (biceps).',
-                reps: { easy: '3×10', medium: '4×12', hard: '5×15' }
-              }
+              { name: 'Pompki klasyczne', description: 'Dłonie na szerokość barków, ciało proste, opuszczasz klatę prawie do ziemi i wypychasz się.', reps: { easy: '3×10', medium: '4×15', hard: '5×20' } },
+              { name: 'Pompki diamentowe', description: 'Dłonie blisko siebie w kształt diamentu; mocno działa triceps.', reps: { easy: '3×8', medium: '4×10', hard: '5×12' } },
+              { name: 'Dipy między krzesłami', description: 'Opierasz się rękami na dwóch krzesłach, zginając łokcie za sobą.', reps: { easy: '3×8', medium: '4×10', hard: '5×12' } },
+              { name: 'Uginanie ramion z plecakiem', description: 'Stajesz prosto, trzymasz plecak jak hantle i uginasz ręce do góry (biceps).', reps: { easy: '3×10', medium: '4×12', hard: '5×15' } }
             ]
           },
-          tuesday: {
-            name: 'Brzuch + Core',
-            emoji: '🔥',
-            exercises: [
-              {
-                name: 'Crunches (brzuszki)',
-                description: 'Leżysz, unosisz klatkę i napinasz brzuch, nie odrywaj całych pleców.',
-                reps: { easy: '3×15', medium: '4×20', hard: '5×25' }
-              },
-              {
-                name: 'Leg raises (unoszenie nóg)',
-                description: 'Leżysz, nogi proste, unosisz do góry, nie dotykając ziemi.',
-                reps: { easy: '3×10', medium: '4×15', hard: '5×20' }
-              },
-              {
-                name: 'Russian twists',
-                description: 'Siedzisz, lekko odchylony, skręcasz tułów raz w prawo, raz w lewo.',
-                reps: { easy: '3×15', medium: '4×25', hard: '5×30' }
-              },
-              {
-                name: 'Plank (deska)',
-                description: 'Opierasz się na łokciach i palcach, ciało proste jak deska.',
-                reps: { easy: '3×20s', medium: '3×40s', hard: '4×60s' }
-              }
-            ]
-          },
-          wednesday: {
-            name: 'Full Body',
-            emoji: '⚡',
-            exercises: [
-              {
-                name: 'Przysiady',
-                description: 'Stopy na szerokość barków, schodzisz jak na krzesło.',
-                reps: { easy: '3×15', medium: '4×20', hard: '5×25' }
-              },
-              {
-                name: 'Burpees',
-                description: 'Przysiad → plank → powrót → wyskok w górę.',
-                reps: { easy: '3×5', medium: '4×7', hard: '5×10' }
-              },
-              {
-                name: 'Pompki szerokie',
-                description: 'Dłonie szerzej niż barki, skup się na klacie.',
-                reps: { easy: '3×10', medium: '4×12', hard: '5×15' }
-              },
-              {
-                name: 'Plank z naprzemiennym unoszeniem rąk',
-                description: 'Klasyczna deska, ale raz unosisz prawą, raz lewą rękę.',
-                reps: { easy: '3×20s', medium: '3×40s', hard: '4×60s' }
-              }
-            ]
-          },
-          thursday: {
-            name: 'Ręce + Klatka (Progres)',
-            emoji: '💪',
-            exercises: [
-              {
-                name: 'Pompki klasyczne',
-                description: 'Powtarzasz poniedziałek, ale zwiększ tempo o 10-20%.',
-                reps: { easy: '3×12', medium: '4×17', hard: '5×24' }
-              },
-              {
-                name: 'Pompki diamentowe',
-                description: 'Dłonie blisko siebie.',
-                reps: { easy: '3×9', medium: '4×12', hard: '5×14' }
-              },
-              {
-                name: 'Dipy między krzesłami',
-                description: 'Opierasz się rękami na dwóch krzesłach.',
-                reps: { easy: '3×9', medium: '4×12', hard: '5×14' }
-              },
-              {
-                name: 'Max pompki',
-                description: 'Zrób tyle pompek ile dasz radę bez przerwy.',
-                reps: { easy: 'MAX', medium: 'MAX', hard: 'MAX' }
-              }
-            ]
-          },
-          friday: {
-            name: 'Brzuch + Cardio',
-            emoji: '🔥',
-            exercises: [
-              {
-                name: 'Mountain climbers',
-                description: 'Pozycja planku, biegniesz w miejscu, kolana do klaty.',
-                reps: { easy: '3×20s', medium: '4×30s', hard: '5×40s' }
-              },
-              {
-                name: 'Crunches',
-                description: 'Leżysz, unosisz klatkę i napinasz brzuch.',
-                reps: { easy: '3×15', medium: '4×20', hard: '5×25' }
-              },
-              {
-                name: 'Leg raises',
-                description: 'Leżysz, nogi proste, unosisz do góry.',
-                reps: { easy: '3×10', medium: '4×15', hard: '5×20' }
-              },
-              {
-                name: 'Pajacyki / Skakanka',
-                description: 'Tempo szybkie, poprawia wydolność.',
-                reps: { easy: '3×30s', medium: '4×45s', hard: '5×60s' }
-              }
-            ]
-          },
-          saturday: {
-            name: 'Full Body + Ramiona',
-            emoji: '🦾',
-            exercises: [
-              {
-                name: 'Pompki diamentowe',
-                description: 'Dłonie blisko siebie.',
-                reps: { easy: '3×8', medium: '4×10', hard: '5×12' }
-              },
-              {
-                name: 'Przysiady',
-                description: 'Stopy na szerokość barków.',
-                reps: { easy: '3×15', medium: '4×20', hard: '5×25' }
-              },
-              {
-                name: 'Biceps z plecakiem',
-                description: 'Uginanie ramion.',
-                reps: { easy: '3×10', medium: '4×12', hard: '5×15' }
-              },
-              {
-                name: 'Dipy',
-                description: 'Między krzesłami.',
-                reps: { easy: '3×8', medium: '4×10', hard: '5×12' }
-              },
-              {
-                name: 'Plank (max czas)',
-                description: 'Trzymaj jak najdłużej.',
-                reps: { easy: '3×20s', medium: '3×40s', hard: '4×60s' }
-              }
-            ]
-          },
-          sunday: {
-            name: 'Odpoczynek / Rozciąganie',
-            emoji: '🧘',
-            exercises: [
-              {
-                name: 'Skłony w przód',
-                description: 'Dotknij palców stóp.',
-                reps: { easy: '3×30s', medium: '3×30s', hard: '3×30s' }
-              },
-              {
-                name: 'Rozciąganie klatki',
-                description: 'Ręce w bok i do tyłu.',
-                reps: { easy: '3×20s', medium: '3×20s', hard: '3×20s' }
-              },
-              {
-                name: 'Krążenia ramion',
-                description: 'Krążenia barków.',
-                reps: { easy: '3×15', medium: '3×15', hard: '3×15' }
-              },
-              {
-                name: 'Plank lub pozycja dziecka',
-                description: 'Rozluźniasz ciało, żeby mięśnie rosły.',
-                reps: { easy: 'relaks', medium: 'relaks', hard: 'relaks' }
-              }
-            ]
-          }
-        }
-      });
-      
-      await andrutPlan.save();
-      console.log('✅ Domyślny plan Andrut został utworzony');
-    }
-  } catch (error) {
-    console.error('❌ Błąd tworzenia domyślnego planu:', error);
-  }
-}
-
-const PORT = process.env.PORT || 5000;
-app.listen(PORT, async () => {
-  console.log(`🚀 Serwer działa na porcie ${PORT}`);
-  await initializeDefaultPlan();
-});
+          tuesday: { name: 'Brzuch + Core', emoji: '🔥', exercises: [{ name: 'Crunches', description: 'Leżysz, unosisz klatkę.', reps: { easy: '3×15', medium: '4×20', hard: '5×25' } }, { name: 'Leg raises', description: 'Nogi proste, unosisz do góry.', reps: { easy: '3×10', medium: '4×15', hard: '5×20' } }, { name: 'Russian twists', description: 'Skręcasz tułów.', reps: { easy: '3×15', medium: '4×25', hard: '5×30' } }, { name: 'Plank', description: 'Deska.', reps: { easy: '3×20s', medium: '3×40s', hard: '4×60s' } }] },
+          wednesday: { name: 'Full Body', emoji: '⚡', exercises: [{ name: 'Przysiady', description: 'Stopy na szerokość barków.', reps: { easy: '3×15', medium: '4×20', hard: '5×25' } }, { name: 'Burpees', description: 'Przysiad, plank, wyskok.', reps: { easy: '3×5', medium: '4×7', hard: '5×10' } }, { name: 'Pompki szerokie', description: 'Dłonie szeroko.', reps: { easy: '3×10', medium: '4×12', hard: '5×15' } }, { name: 'Plank z unoszeniem rąk', description: 'Deska z naprzemiennym unoszeniem.', reps: { easy: '3×20s', medium: '3×40s', hard: '4×60s' } }] },
+          thursday: { name: 'Ręce + Klatka (Progres)', emoji: '💪', exercises: [{ name: 'Pompki klasyczne', description: 'Zwiększ tempo o 10-20%.', reps: { easy: '3×12', medium: '4×17', hard: '5×24' } }, { name: 'Pompki diamentowe', description: 'Dłonie blisko.', reps: { easy: '3×9', medium: '4×12', hard: '5×14' } }, { name: 'Dipy', description: 'Między krzesłami.', reps: { easy: '3×9', medium: '4×12', hard: '5×14' } }, { name: 'Max pompki', description: 'Ile dasz radę.', reps: { easy: 'MAX', medium: 'MAX', hard: 'MAX' } }] },
+          friday: { name: 'Brzuch + Cardio', emoji: '🔥', exercises: [{ name: 'Mountain climbers', description: 'Biegniesz w miejscu.', reps: { easy: '3×20s', medium: '4×30s', hard: '5×40s' } }, { name: 'Crunches', description: 'Brzuszki.', reps: { easy: '3×15', medium: '4×20', hard: '5×25' } }, { name: 'Leg raises', description: 'Unoszenie nóg.', reps: { easy: '3×10', medium: '4×15', hard: '5×20' } }, { name: 'Pajacyki', description: 'Cardio.', reps: { easy: '3×30s', medium: '4×45s', hard: '5×60s' } }] },
+          saturday: { name: 'Full Body + Ramiona', emoji: '🦾', exercises: [{ name: 'Pompki diamentowe', description: 'Dłonie blisko.', reps: { easy: '3×8', medium: '4×10', hard: '5×12' } }, { name: 'Przysiady', description: 'Głębokie.', reps: { easy: '3×15', medium: '4×20', hard: '5×25' } }, { name: 'Biceps z plecakiem', description: 'Uginanie.', reps: { easy: '3×10', medium: '4×12', hard: '5×15' } }, { name: 'Dipy', description: 'Między krzesłami.', reps: { easy: '3×8', medium: '4×10', hard: '5×12' } }, { name: 'Plank max', description: 'Jak najdłużej.', reps: { easy: '3×20s', medium: '3×40s', hard: '4×60s' } }] },
+          sunday: { name: 'Odpoczynek', emoji: '🧘', exercises: [{ name: 'Skłony', description: 'Rozciąganie.', reps: { easy: '3×30s', medium: '3×30s', hard: '3×30s' } }, { name: 'Rozciąganie klatki', description: 'Ręce w bok.', reps: { easy: '3×20s', medium: '3×20s', hard: '3×20s' } }, { name: 'Krążenia ramion', description: 'Rozgrzewka.', reps: { easy: '3×15', medium: '3×15', hard: '3×15' } }, { name: 'Pozycja dziecka', description: 'Relaks.', reps: { easy: 'relaks', medium: 'relaks', hard: 'relaks' } }] }
